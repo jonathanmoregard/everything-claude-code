@@ -153,7 +153,7 @@ case "$ACTION" in
         echo "Log: $LOG_FILE"
         echo "Observations: $(wc -l < "$OBSERVATIONS_FILE" 2>/dev/null || echo 0) lines"
         # Also show instinct count
-        instinct_count=$(find "$INSTINCTS_DIR" -name "*.yaml" 2>/dev/null | wc -l)
+        instinct_count=$(find "$INSTINCTS_DIR" \( -name "*.md" -o -name "*.yaml" \) 2>/dev/null | wc -l)
         echo "Instincts: $instinct_count"
         exit 0
       else

@@ -205,6 +205,7 @@ PROMPT
   # mktemp absolute path continuing to resolve after cwd changes (#1296).
   ECC_SKIP_OBSERVE=1 ECC_HOOK_PROFILE=minimal claude --model haiku --max-turns "$max_turns" --print \
     --allowedTools "Read,Write" \
+    --permission-mode bypassPermissions \
     -p "$prompt_content" >> "$LOG_FILE" 2>&1 &
   claude_pid=$!
 
