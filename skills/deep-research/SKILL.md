@@ -1,12 +1,12 @@
 ---
 name: deep-research
-description: Multi-source deep research using firecrawl and exa MCPs. Searches the web, synthesizes findings, and delivers cited reports with source attribution. Use when the user wants thorough research on any topic with evidence and citations.
+description: Multi-source deep research using the exa MCP. Searches the web, synthesizes findings, and delivers cited reports with source attribution. Use when the user wants thorough research on any topic with evidence and citations.
 origin: ECC
 ---
 
 # Deep Research
 
-Produce thorough, cited research reports from multiple web sources using firecrawl and exa MCP tools.
+Produce thorough, cited research reports from multiple web sources using exa MCP tools.
 
 ## When to Activate
 
@@ -18,11 +18,9 @@ Produce thorough, cited research reports from multiple web sources using firecra
 
 ## MCP Requirements
 
-At least one of:
-- **firecrawl** — `firecrawl_search`, `firecrawl_scrape`, `firecrawl_crawl`
-- **exa** — `web_search_exa`, `web_search_advanced_exa`, `crawling_exa`
+- **exa** — `mcp__exa__web_search_exa`, `mcp__exa__web_fetch_exa`
 
-Both together give the best coverage. Configure in `~/.claude.json` or `~/.codex/config.toml`.
+Configure in `~/.claude.json` or `~/.codex/config.toml`.
 
 ## Workflow
 
@@ -48,15 +46,8 @@ Break the topic into 3-5 research sub-questions. Example:
 
 For EACH sub-question, search using available MCP tools:
 
-**With firecrawl:**
 ```
-firecrawl_search(query: "<sub-question keywords>", limit: 8)
-```
-
-**With exa:**
-```
-web_search_exa(query: "<sub-question keywords>", numResults: 8)
-web_search_advanced_exa(query: "<keywords>", numResults: 5, startPublishedDate: "2025-01-01")
+mcp__exa__web_search_exa(query: "<sub-question keywords>", numResults: 8)
 ```
 
 **Search strategy:**
@@ -69,14 +60,8 @@ web_search_advanced_exa(query: "<keywords>", numResults: 5, startPublishedDate: 
 
 For the most promising URLs, fetch full content:
 
-**With firecrawl:**
 ```
-firecrawl_scrape(url: "<url>")
-```
-
-**With exa:**
-```
-crawling_exa(url: "<url>", tokensNum: 5000)
+mcp__exa__web_fetch_exa(url: "<url>")
 ```
 
 Read 3-5 key sources in full for depth. Do not rely only on search snippets.
