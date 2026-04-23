@@ -1,9 +1,9 @@
 {
-  "evaluated_at": "2026-04-16T18:34:02Z",
-  "mode": "full",
+  "evaluated_at": "2026-04-21T14:30:00Z",
+  "mode": "quick",
   "batch_progress": {
-    "total": 33,
-    "evaluated": 33,
+    "total": 36,
+    "evaluated": 36,
     "status": "completed"
   },
   "skills": {
@@ -258,6 +258,24 @@
       "verdict": "Retire",
       "reason": "No SKILL.md file found — directory contains only eval iteration folders (iteration-1/api-rate-limiting, bun-vs-node, env-vars-nodejs) making it an incomplete/abandoned workspace. Research functionality is covered by research-ops, exa-search, and deep-research.",
       "mtime": "2026-03-12T00:00:00Z"
+    },
+    "advice-refine-test-loop": {
+      "path": "~/.claude/skills/advice-refine-test-loop/SKILL.md",
+      "verdict": "Keep",
+      "reason": "New skill encoding the Opus-advisor + empirical-verification loop as a compact 8-step round with reproduce-before-fix discipline and anti-patterns table. Unique scope: no other skill covers the multi-round advisor loop. Complements (does not duplicate) autonomous-mode (which covers advisor escalation generally) and step-back (single Opus handoff). Crisp 62-line playbook with concrete prompt shape and exit criteria — high actionability.",
+      "mtime": "2026-04-21T00:00:00Z"
+    },
+    "honeypot-manufacturing": {
+      "path": "~/.claude/skills/honeypot-manufacturing/SKILL.md",
+      "verdict": "Keep",
+      "reason": "New skill encoding three behavioral-sandbox invariants (realism, zero plugin-visible tells, fail-closed setup) plus a concrete detection mechanism (bait tools + report_issue channel + atomic trigger file). Unique: no other skill covers building LLM-victim trap harnesses. Directly supports the repo-check project in this workspace. Concrete forbidden-terms table and outcome matrix make it immediately usable, not abstract.",
+      "mtime": "2026-04-21T00:00:00Z"
+    },
+    "repo-check": {
+      "path": "/home/jonathan/Repos/repo-check/.claude/skills/repo-check.md",
+      "verdict": "Keep",
+      "reason": "New project-level skill (not global). Thin wrapper (31 lines) that invokes the repo-check.py vetting pipeline and formats the verdict/phase rundown for the user. Scope is tight and project-specific: runs the tool, reads /tmp output, reports Verdict -> Phase C (canary) -> Phase B (static) -> Phase A (supply chain) -> recommendation. No overlap with any global skill; this is the project-local /repo-check command. Actionable and correctly-bounded.",
+      "mtime": "2026-04-21T00:00:00Z"
     }
   }
 }
