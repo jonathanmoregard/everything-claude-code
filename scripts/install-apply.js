@@ -6,11 +6,27 @@
  * target-specific mutation logic into testable Node code.
  */
 
+const fs = require('fs');
 const os = require('os');
+const path = require('path');
 const {
   SUPPORTED_INSTALL_TARGETS,
   listLegacyCompatibilityLanguages,
 } = require('./lib/install-manifests');
+
+function guardClaudeHomeInstall(plan) {
+  if (plan.target !== 'claude') return;
+  const home = process.env.HOME || os.homedir();
+  const claudeRoot = plan.installRoot || path.join(home, '.claude');
+  if (path.resolve(claudeRoot) !== path.resolve(path.join(home, '.claude'))) return;
+  const sentinel = path.join(claudeRoot, 'ecc', '.allow-bulk-install');
+  if (fs.existsSync(sentinel)) return;
+  process.stderr.write(
+    `Refusing to bulk-install ECC into ${claudeRoot}.\n` +
+    `Curated symlinks only. To override, create:\n  ${sentinel}\n`
+  );
+  process.exit(2);
+}
 const {
   LEGACY_INSTALL_TARGETS,
   normalizeInstallRequest,
@@ -134,6 +150,8 @@ function main() {
       }
       return;
     }
+
+    guardClaudeHomeInstall(plan);
 
     const result = applyInstallPlan(plan);
     if (options.json) {
