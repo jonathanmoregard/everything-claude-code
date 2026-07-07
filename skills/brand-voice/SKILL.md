@@ -16,9 +16,10 @@ Build a durable voice profile from real source material, then use that profile e
 - the existing content lane needs a reusable style system instead of one-off mimicry
 
 **Building a brand/marketing playbook from scratch (new brand, rebrand, positioning)?**
-This skill is step 1 of the `marketing-playbook` skill — use that as the parent
-workflow. The voice profile defines HOW the brand sounds; marketing-playbook's
-rant → point-of-view steps define WHAT it believes. Voice without POV reads as costume.
+If a `marketing-playbook` skill is installed, use it as the parent workflow — this
+skill is its step 1. The voice profile defines HOW the brand sounds; a
+point-of-view/positioning pass defines WHAT it believes. Voice without POV reads as
+costume.
 
 ## Source Priority
 
