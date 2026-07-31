@@ -791,23 +791,44 @@ def cmd_evolve(args) -> int:
     high_conf = [i for i in instincts if i.get('confidence', 0) >= 0.8]
     print(f"High confidence instincts (>=80%): {len(high_conf)}")
 
-    # Find clusters (instincts with similar triggers)
+    # Cluster on (domain, 2-token id prefix).
+    #
+    # Previous version normalized the free-text `trigger` field by lowercasing
+    # + stripping 6 stopwords, then exact-string grouped. On real corpora
+    # (research-agent: 161 instincts, kablong: 243) that produced 0 clusters —
+    # trigger vocabulary is high-cardinality, so every atom becomes a singleton.
+    # Documented failure mode in
+    # ~/Repos/research-agent/reports/ca877f858c844ce8839110f683dcbc6f.md §6.
+    #
+    # The id-prefix carries the cluster signal reliably (advisor-*, agenix-*,
+    # bash-diagnostic-* etc). Single-token prefix over-clusters (all `bash-*`
+    # fall into one slop bucket), so this uses TWO tokens. Domain is joined
+    # in to keep e.g. `bash-diagnostic-*` in workflow separated from any
+    # `bash-diagnostic-*` in a different domain (rare but possible).
+    #
+    # Sublimate-style tool-call k-gram clustering on the underlying
+    # observations.jsonl is a stronger v2 approach but requires wiring
+    # session_id back to instinct_id, which the current instinct file schema
+    # does not capture — deferred until that link exists.
+    def _prefix_key(inst):
+        iid = str(inst.get('id') or '')
+        parts = iid.split('-')
+        if len(parts) >= 2:
+            return f"{parts[0]}-{parts[1]}"
+        return parts[0] if parts else 'ungrouped'
+
     trigger_clusters = defaultdict(list)
     for inst in instincts:
-        trigger = inst.get('trigger', '')
-        # Normalize trigger
-        trigger_key = trigger.lower()
-        for keyword in ['when', 'creating', 'writing', 'adding', 'implementing', 'testing']:
-            trigger_key = trigger_key.replace(keyword, '').strip()
-        trigger_clusters[trigger_key].append(inst)
+        cluster_key = (inst.get('domain', 'general'), _prefix_key(inst))
+        trigger_clusters[cluster_key].append(inst)
 
     # Find clusters with 2+ instincts (good skill candidates)
     skill_candidates = []
-    for trigger, cluster in trigger_clusters.items():
+    for (domain, prefix), cluster in trigger_clusters.items():
         if len(cluster) >= 2:
             avg_conf = sum(i.get('confidence', 0.5) for i in cluster) / len(cluster)
             skill_candidates.append({
-                'trigger': trigger,
+                'trigger': f"{domain}:{prefix}-*",
                 'instincts': cluster,
                 'avg_confidence': avg_conf,
                 'domains': list(set(i.get('domain', 'general') for i in cluster)),
