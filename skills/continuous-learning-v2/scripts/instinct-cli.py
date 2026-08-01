@@ -54,6 +54,24 @@ PROMOTE_CONFIDENCE_THRESHOLD = 0.8
 PROMOTE_MIN_PROJECTS = 2
 ALLOWED_INSTINCT_EXTENSIONS = (".yaml", ".yml", ".md")
 
+# Named confidence tiers. Instinct confidence moves through these levels;
+# comparisons in this file use the tier names where the meaning matches
+# exactly — thresholds that mean something else keep their own value.
+CONFIDENCE_HYPOTHESIS = 0.3   # captured once, unconfirmed
+CONFIDENCE_OBSERVED = 0.5     # recorded with evidence (also the parser default)
+CONFIDENCE_ESTABLISHED = 0.7  # repeatedly confirmed; trusted for candidates
+CONFIDENCE_PROVEN = 0.9       # battle-tested across sessions
+
+# Adjustment rules applied when an instinct is observed again or corrected.
+CONFIDENCE_REPEAT_BOOST = 0.1        # repeat observation of an existing instinct
+CONFIDENCE_CORRECTION_PENALTY = 0.2  # explicit user-correction signal
+CONFIDENCE_CEILING = 0.95            # never fully certain
+CONFIDENCE_FLOOR = 0.05              # never fully dismissed
+
+# Agent candidates need a stricter average than ESTABLISHED; 0.75 is its own
+# threshold, not a tier.
+AGENT_CANDIDATE_MIN_AVG_CONFIDENCE = 0.75
+
 # Evolved-skill generation caps. Enforced on every skill write path (create
 # and append). Commands/agents generation uses separate inline writes and is
 # intentionally NOT routed through these caps — scoped to skills only.
@@ -129,6 +147,27 @@ def _yaml_quote(value: str) -> str:
     """
     escaped = value.replace('\\', '\\\\').replace('"', '\\"')
     return f'"{escaped}"'
+
+
+# ─────────────────────────────────────────────
+# Confidence Adjustment
+# ─────────────────────────────────────────────
+
+def _reinforce_confidence(confidence: float) -> float:
+    """Repeat observation of an existing instinct: +CONFIDENCE_REPEAT_BOOST,
+    capped at CONFIDENCE_CEILING. Rounded to keep frontmatter floats clean."""
+    return round(min(CONFIDENCE_CEILING, confidence + CONFIDENCE_REPEAT_BOOST), 2)
+
+
+def _weaken_confidence(confidence: float) -> float:
+    """Explicit user-correction signal: -CONFIDENCE_CORRECTION_PENALTY,
+    floored at CONFIDENCE_FLOOR.
+
+    Ready but unwired: this CLI does not yet parse any user-correction signal
+    (observations.jsonl is only ever line-counted) — call this where such a
+    source lands, e.g. an observation event of type 'user_correction'.
+    """
+    return round(max(CONFIDENCE_FLOOR, confidence - CONFIDENCE_CORRECTION_PENALTY), 2)
 
 
 # ─────────────────────────────────────────────
@@ -580,6 +619,12 @@ def cmd_import(args) -> int:
             existing_inst = next((e for e in existing if e.get('id') == inst_id), None)
             if existing_inst:
                 if inst.get('confidence', 0) > existing_inst.get('confidence', 0):
+                    # A higher-confidence collision is a repeat observation of
+                    # an existing instinct: reinforce (+boost, capped) instead
+                    # of just taking the incoming value.
+                    inst = dict(inst)
+                    inst['confidence'] = _reinforce_confidence(
+                        inst.get('confidence', CONFIDENCE_OBSERVED))
                     to_update.append(inst)
                 else:
                     duplicates.append(inst)
@@ -797,7 +842,9 @@ def cmd_evolve(args) -> int:
         domain = inst.get('domain', 'general')
         by_domain[domain].append(inst)
 
-    # High-confidence instincts by domain (candidates for skills)
+    # High-confidence instincts by domain (candidates for skills).
+    # 0.8 is a display bar only — matches neither a tier nor the promotion
+    # threshold's meaning, so it stays a deliberate literal.
     high_conf = [i for i in instincts if i.get('confidence', 0) >= 0.8]
     print(f"High confidence instincts (>=80%): {len(high_conf)}")
 
@@ -865,7 +912,8 @@ def cmd_evolve(args) -> int:
             print()
 
     # Command candidates (workflow instincts with high confidence)
-    workflow_instincts = [i for i in instincts if i.get('domain') == 'workflow' and i.get('confidence', 0) >= 0.7]
+    workflow_instincts = [i for i in instincts if i.get('domain') == 'workflow'
+                          and i.get('confidence', 0) >= CONFIDENCE_ESTABLISHED]
     if workflow_instincts:
         print(f"\n## COMMAND CANDIDATES ({len(workflow_instincts)})\n")
         for inst in workflow_instincts[:5]:
@@ -878,7 +926,8 @@ def cmd_evolve(args) -> int:
             print()
 
     # Agent candidates (complex multi-step patterns)
-    agent_candidates = [c for c in skill_candidates if len(c['instincts']) >= 3 and c['avg_confidence'] >= 0.75]
+    agent_candidates = [c for c in skill_candidates if len(c['instincts']) >= 3
+                        and c['avg_confidence'] >= AGENT_CANDIDATE_MIN_AVG_CONFIDENCE]
     if agent_candidates:
         print(f"\n## AGENT CANDIDATES ({len(agent_candidates)})\n")
         for cand in agent_candidates[:3]:

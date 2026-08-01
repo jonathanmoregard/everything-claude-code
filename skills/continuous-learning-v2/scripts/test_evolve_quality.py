@@ -2,11 +2,14 @@
 
 Part A: evolved-skill dedupe — Jaccard overlap append-vs-create, frontmatter
         evolved_from merge, 50KB size cap, 20-line evidence cap.
+Part B: named confidence tiers + adjustment rules (+0.1 repeat cap 0.95,
+        -0.2 correction floor 0.05) and cmd_import collision wiring.
 """
 
 import importlib.util
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -264,3 +267,131 @@ def test_create_refused_over_size_cap(evolved_dir, capsys):
     assert generated == []
     out = capsys.readouterr().out
     assert "refus" in out.lower()
+
+
+# ─────────────────────────────────────────────
+# Part B: confidence tiers + adjustment rules
+# ─────────────────────────────────────────────
+
+def test_confidence_tier_constants():
+    assert _mod.CONFIDENCE_HYPOTHESIS == 0.3
+    assert _mod.CONFIDENCE_OBSERVED == 0.5
+    assert _mod.CONFIDENCE_ESTABLISHED == 0.7
+    assert _mod.CONFIDENCE_PROVEN == 0.9
+
+
+def test_agent_candidate_threshold_is_own_constant():
+    # 0.75 has no tier constant — it gets a named constant of its own
+    assert _mod.AGENT_CANDIDATE_MIN_AVG_CONFIDENCE == 0.75
+
+
+def test_reinforce_confidence_adds_boost_and_caps():
+    assert _mod._reinforce_confidence(0.5) == 0.6
+    assert _mod._reinforce_confidence(0.9) == 0.95   # 1.0 capped
+    assert _mod._reinforce_confidence(0.95) == 0.95  # already at ceiling
+
+
+def test_weaken_confidence_subtracts_and_floors():
+    assert _mod._weaken_confidence(0.5) == 0.3
+    assert _mod._weaken_confidence(0.2) == 0.05  # 0.0 floored
+    assert _mod._weaken_confidence(0.1) == 0.05  # below floor after penalty
+
+
+# ─────────────────────────────────────────────
+# Part B: cmd_import collision reinforcement wiring
+# ─────────────────────────────────────────────
+
+def _instinct_yaml(iid, confidence, domain="general"):
+    return (
+        "---\n"
+        f"id: {iid}\n"
+        f'trigger: "when {iid}"\n'
+        f"confidence: {confidence}\n"
+        f"domain: {domain}\n"
+        "scope: global\n"
+        "---\n\n"
+        "## Action\n"
+        f"Action for {iid}.\n\n"
+    )
+
+
+@pytest.fixture
+def global_tree(tmp_path, monkeypatch):
+    """Patch module globals to a tmp homunculus tree; detect global project."""
+    homunculus = tmp_path / ".claude" / "homunculus"
+    instincts_root = homunculus / "instincts"
+    personal = instincts_root / "personal"
+    inherited = instincts_root / "inherited"
+    evolved = homunculus / "evolved"
+    projects = homunculus / "projects"
+    for d in [personal, inherited, evolved / "skills",
+              evolved / "commands", evolved / "agents", projects]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(_mod, "HOMUNCULUS_DIR", homunculus)
+    monkeypatch.setattr(_mod, "PROJECTS_DIR", projects)
+    monkeypatch.setattr(_mod, "REGISTRY_FILE", homunculus / "projects.json")
+    monkeypatch.setattr(_mod, "GLOBAL_INSTINCTS_DIR", instincts_root)
+    monkeypatch.setattr(_mod, "GLOBAL_PERSONAL_DIR", personal)
+    monkeypatch.setattr(_mod, "GLOBAL_INHERITED_DIR", inherited)
+    monkeypatch.setattr(_mod, "GLOBAL_EVOLVED_DIR", evolved)
+    monkeypatch.setattr(_mod, "GLOBAL_OBSERVATIONS_FILE", homunculus / "observations.jsonl")
+
+    global_project = {
+        "id": "global",
+        "name": "global",
+        "root": "",
+        "project_dir": homunculus,
+        "instincts_personal": personal,
+        "instincts_inherited": inherited,
+        "evolved_dir": evolved,
+        "observations_file": homunculus / "observations.jsonl",
+    }
+    monkeypatch.setattr(_mod, "detect_project", lambda: global_project)
+    return {"personal": personal, "inherited": inherited, "root": tmp_path}
+
+
+def test_import_collision_reinforces_confidence(global_tree, capsys):
+    """Higher-confidence collision = repeat observation: +0.1, capped 0.95."""
+    (global_tree["inherited"] / "existing.yaml").write_text(
+        _instinct_yaml("repeat-instinct", 0.5) + _instinct_yaml("near-cap", 0.85),
+        encoding="utf-8")
+
+    src = global_tree["root"] / "incoming.yaml"
+    src.write_text(
+        _instinct_yaml("repeat-instinct", 0.6)
+        + _instinct_yaml("near-cap", 0.9)
+        + _instinct_yaml("fresh-one", 0.6),
+        encoding="utf-8")
+
+    args = SimpleNamespace(source=str(src), dry_run=False, force=True,
+                           min_confidence=None, scope="global")
+    ret = _mod.cmd_import(args)
+    assert ret == 0
+
+    written = [f for f in global_tree["inherited"].glob("incoming-*.yaml")]
+    assert len(written) == 1
+    content = written[0].read_text(encoding="utf-8")
+
+    # Collisions reinforced: 0.6 -> 0.7, 0.9 -> capped 0.95
+    assert "confidence: 0.7\n" in content
+    assert "confidence: 0.95\n" in content
+    # Fresh instinct imported unchanged
+    assert "confidence: 0.6\n" in content
+
+
+def test_import_lower_confidence_still_skipped(global_tree, capsys):
+    """Equal/lower-confidence collisions stay in the skip bucket (no boost)."""
+    (global_tree["inherited"] / "existing.yaml").write_text(
+        _instinct_yaml("repeat-instinct", 0.8), encoding="utf-8")
+
+    src = global_tree["root"] / "incoming.yaml"
+    src.write_text(_instinct_yaml("repeat-instinct", 0.7), encoding="utf-8")
+
+    args = SimpleNamespace(source=str(src), dry_run=False, force=True,
+                           min_confidence=None, scope="global")
+    ret = _mod.cmd_import(args)
+    assert ret == 0
+    out = capsys.readouterr().out
+    assert "SKIP" in out
+    assert list(global_tree["inherited"].glob("incoming-*.yaml")) == []
