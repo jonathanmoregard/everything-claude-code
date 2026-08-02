@@ -54,6 +54,34 @@ PROMOTE_CONFIDENCE_THRESHOLD = 0.8
 PROMOTE_MIN_PROJECTS = 2
 ALLOWED_INSTINCT_EXTENSIONS = (".yaml", ".yml", ".md")
 
+# Named confidence tiers. Instinct confidence moves through these levels;
+# comparisons in this file use the tier names where the meaning matches
+# exactly — thresholds that mean something else keep their own value.
+CONFIDENCE_HYPOTHESIS = 0.3   # captured once, unconfirmed
+CONFIDENCE_OBSERVED = 0.5     # recorded with evidence (also the parser default)
+CONFIDENCE_ESTABLISHED = 0.7  # repeatedly confirmed; trusted for candidates
+CONFIDENCE_PROVEN = 0.9       # battle-tested across sessions
+
+# Adjustment rules applied when an instinct is observed again or corrected.
+CONFIDENCE_REPEAT_BOOST = 0.1        # repeat observation of an existing instinct
+CONFIDENCE_CORRECTION_PENALTY = 0.2  # explicit user-correction signal
+CONFIDENCE_CEILING = 0.95            # never fully certain
+CONFIDENCE_FLOOR = 0.05              # never fully dismissed
+
+# Agent candidates need a stricter average than ESTABLISHED; 0.75 is its own
+# threshold, not a tier.
+AGENT_CANDIDATE_MIN_AVG_CONFIDENCE = 0.75
+
+# Evolved-skill generation caps. Enforced on every skill write path (create
+# and append). Commands/agents generation uses separate inline writes and is
+# intentionally NOT routed through these caps — scoped to skills only.
+EVOLVED_SKILL_MAX_BYTES = 50 * 1024      # refuse any write that would exceed 50KB
+EVOLVED_SKILL_MAX_EVIDENCE_LINES = 20    # max evidence bullets per skill file
+# Jaccard overlap between a new cluster's instinct-id set and an existing
+# skill's evolved_from set at/above which we append into the existing skill
+# instead of creating a near-duplicate sibling.
+EVOLVED_SKILL_APPEND_OVERLAP = 0.8
+
 # Default TTL for pending instincts (days)
 PENDING_TTL_DAYS = 30
 # Warning threshold: show expiry warning when instinct expires within this many days
@@ -119,6 +147,27 @@ def _yaml_quote(value: str) -> str:
     """
     escaped = value.replace('\\', '\\\\').replace('"', '\\"')
     return f'"{escaped}"'
+
+
+# ─────────────────────────────────────────────
+# Confidence Adjustment
+# ─────────────────────────────────────────────
+
+def _reinforce_confidence(confidence: float) -> float:
+    """Repeat observation of an existing instinct: +CONFIDENCE_REPEAT_BOOST,
+    capped at CONFIDENCE_CEILING. Rounded to keep frontmatter floats clean."""
+    return round(min(CONFIDENCE_CEILING, confidence + CONFIDENCE_REPEAT_BOOST), 2)
+
+
+def _weaken_confidence(confidence: float) -> float:
+    """Explicit user-correction signal: -CONFIDENCE_CORRECTION_PENALTY,
+    floored at CONFIDENCE_FLOOR.
+
+    Ready but unwired: this CLI does not yet parse any user-correction signal
+    (observations.jsonl is only ever line-counted) — call this where such a
+    source lands, e.g. an observation event of type 'user_correction'.
+    """
+    return round(max(CONFIDENCE_FLOOR, confidence - CONFIDENCE_CORRECTION_PENALTY), 2)
 
 
 # ─────────────────────────────────────────────
@@ -570,6 +619,12 @@ def cmd_import(args) -> int:
             existing_inst = next((e for e in existing if e.get('id') == inst_id), None)
             if existing_inst:
                 if inst.get('confidence', 0) > existing_inst.get('confidence', 0):
+                    # A higher-confidence collision is a repeat observation of
+                    # an existing instinct: reinforce (+boost, capped) instead
+                    # of just taking the incoming value.
+                    inst = dict(inst)
+                    inst['confidence'] = _reinforce_confidence(
+                        inst.get('confidence', CONFIDENCE_OBSERVED))
                     to_update.append(inst)
                 else:
                     duplicates.append(inst)
@@ -787,7 +842,9 @@ def cmd_evolve(args) -> int:
         domain = inst.get('domain', 'general')
         by_domain[domain].append(inst)
 
-    # High-confidence instincts by domain (candidates for skills)
+    # High-confidence instincts by domain (candidates for skills).
+    # 0.8 is a display bar only — matches neither a tier nor the promotion
+    # threshold's meaning, so it stays a deliberate literal.
     high_conf = [i for i in instincts if i.get('confidence', 0) >= 0.8]
     print(f"High confidence instincts (>=80%): {len(high_conf)}")
 
@@ -855,7 +912,8 @@ def cmd_evolve(args) -> int:
             print()
 
     # Command candidates (workflow instincts with high confidence)
-    workflow_instincts = [i for i in instincts if i.get('domain') == 'workflow' and i.get('confidence', 0) >= 0.7]
+    workflow_instincts = [i for i in instincts if i.get('domain') == 'workflow'
+                          and i.get('confidence', 0) >= CONFIDENCE_ESTABLISHED]
     if workflow_instincts:
         print(f"\n## COMMAND CANDIDATES ({len(workflow_instincts)})\n")
         for inst in workflow_instincts[:5]:
@@ -868,7 +926,8 @@ def cmd_evolve(args) -> int:
             print()
 
     # Agent candidates (complex multi-step patterns)
-    agent_candidates = [c for c in skill_candidates if len(c['instincts']) >= 3 and c['avg_confidence'] >= 0.75]
+    agent_candidates = [c for c in skill_candidates if len(c['instincts']) >= 3
+                        and c['avg_confidence'] >= AGENT_CANDIDATE_MIN_AVG_CONFIDENCE]
     if agent_candidates:
         print(f"\n## AGENT CANDIDATES ({len(agent_candidates)})\n")
         for cand in agent_candidates[:3]:
@@ -1157,6 +1216,196 @@ def cmd_projects(args) -> int:
 # Generate Evolved Structures
 # ─────────────────────────────────────────────
 
+def _jaccard(a: set, b: set) -> float:
+    """Jaccard overlap |A ∩ B| / |A ∪ B|. Empty union → 0.0."""
+    union = a | b
+    if not union:
+        return 0.0
+    return len(a & b) / len(union)
+
+
+def _instinct_action(inst: dict) -> str:
+    """Extract the first Action line from an instinct's content (id fallback)."""
+    inst_content = inst.get('content', '')
+    action_match = re.search(r'## Action\s*\n\s*(.+?)(?:\n\n|\n##|$)', inst_content, re.DOTALL)
+    return action_match.group(1).strip() if action_match else inst.get('id', 'unnamed')
+
+
+def _parse_evolved_skill_text(text: str) -> dict:
+    """Parse a generated evolved-skill file.
+
+    Returns {'evolved_from': [ids...], 'meta': {key: value}, 'body': str}.
+    Files without parseable frontmatter get an empty evolved_from list, so
+    legacy files (pre-frontmatter format) never match as append targets and
+    keep their old overwrite-by-name behavior.
+    """
+    evolved_from = []
+    meta = {}
+    body = text
+    lines = text.split('\n')
+    if lines and lines[0].strip() == '---':
+        in_evolved_from = False
+        for idx in range(1, len(lines)):
+            line = lines[idx]
+            if line.strip() == '---':
+                body = '\n'.join(lines[idx + 1:])
+                break
+            if in_evolved_from and line.strip().startswith('- '):
+                evolved_from.append(line.strip()[2:].strip())
+                continue
+            if ':' in line:
+                key, value = line.split(':', 1)
+                key = key.strip()
+                value = value.strip()
+                in_evolved_from = (key == 'evolved_from' and not value)
+                if not in_evolved_from:
+                    meta[key] = value
+            else:
+                in_evolved_from = False
+        else:
+            # No closing '---': not valid frontmatter — treat whole text as body
+            return {'evolved_from': [], 'meta': {}, 'body': text}
+    return {'evolved_from': evolved_from, 'meta': meta, 'body': body}
+
+
+def _render_evolved_frontmatter(name: str, evolved_from: list[str]) -> str:
+    fm = "---\n"
+    fm += f"name: {name}\n"
+    fm += "evolved_from:\n"
+    for iid in evolved_from:
+        fm += f"  - {iid}\n"
+    fm += "---\n"
+    return fm
+
+
+def _extract_evidence_lines(body: str) -> list[str]:
+    """Return the evidence bullets: '- ' lines under the '## Actions' header."""
+    out = []
+    in_actions = False
+    for line in body.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('## '):
+            in_actions = (stripped == '## Actions')
+            continue
+        if in_actions and stripped.startswith('- '):
+            out.append(line.rstrip())
+    return out
+
+
+def _set_evidence_lines(body: str, evidence: list[str]) -> str:
+    """Replace the bullet list under '## Actions' with the given lines.
+
+    Appends an Actions section if the body has none. Any later '## ' sections
+    are preserved.
+    """
+    lines = body.split('\n')
+    out = []
+    i = 0
+    n = len(lines)
+    placed = False
+    while i < n:
+        line = lines[i]
+        out.append(line)
+        if line.strip() == '## Actions' and not placed:
+            placed = True
+            out.append('')
+            out.extend(evidence)
+            i += 1
+            while i < n and not lines[i].strip().startswith('## '):
+                i += 1
+            continue
+        i += 1
+    if not placed:
+        if out and out[-1].strip():
+            out.append('')
+        out.append('## Actions')
+        out.append('')
+        out.extend(evidence)
+    return '\n'.join(out).rstrip('\n') + '\n'
+
+
+def _cap_evidence_lines(evidence: list[str]) -> list[str]:
+    """Enforce the per-file evidence cap.
+
+    Policy: keep the NEWEST lines (tail). Evidence accumulates append-only, so
+    later lines reflect the current instinct corpus — recency wins over
+    founding evidence when the file is full.
+    """
+    if len(evidence) <= EVOLVED_SKILL_MAX_EVIDENCE_LINES:
+        return evidence
+    dropped = len(evidence) - EVOLVED_SKILL_MAX_EVIDENCE_LINES
+    print(f"   Note: evidence capped at {EVOLVED_SKILL_MAX_EVIDENCE_LINES} lines "
+          f"({dropped} oldest dropped)")
+    return evidence[-EVOLVED_SKILL_MAX_EVIDENCE_LINES:]
+
+
+def _write_evolved_skill(path: Path, text: str) -> bool:
+    """Write a skill file, refusing anything over the size cap."""
+    data = text.encode('utf-8')
+    if len(data) > EVOLVED_SKILL_MAX_BYTES:
+        print(f"   Note: refusing to write {path} — {len(data)} bytes exceeds "
+              f"the {EVOLVED_SKILL_MAX_BYTES} byte cap; file left unchanged")
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
+def _find_append_target(skills_dir: Path, new_ids: set) -> Optional[Path]:
+    """Find an existing generated skill whose evolved_from set overlaps the
+    new cluster's instinct ids at/above EVOLVED_SKILL_APPEND_OVERLAP."""
+    if not new_ids or not skills_dir.is_dir():
+        return None
+    best_path = None
+    best_overlap = 0.0
+    for skill_file in sorted(skills_dir.glob("*/SKILL.md")):
+        try:
+            text = skill_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        existing_ids = {i for i in _parse_evolved_skill_text(text)['evolved_from'] if i}
+        overlap = _jaccard(new_ids, existing_ids)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_path = skill_file
+    if best_overlap >= EVOLVED_SKILL_APPEND_OVERLAP:
+        return best_path
+    return None
+
+
+def _append_to_evolved_skill(path: Path, cand: dict) -> bool:
+    """Merge a cluster into an existing skill file instead of creating a sibling.
+
+    Merges new instinct ids into evolved_from (deduped, existing order kept)
+    and appends one evidence bullet per new instinct. Both caps apply.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    parsed = _parse_evolved_skill_text(text)
+    merged_ids = list(parsed['evolved_from'])
+    seen_ids = set(merged_ids)
+    evidence = _extract_evidence_lines(parsed['body'])
+    seen_lines = set(evidence)
+
+    for inst in cand['instincts']:
+        iid = inst.get('id')
+        if not iid or iid in seen_ids:
+            continue
+        merged_ids.append(iid)
+        seen_ids.add(iid)
+        line = f"- {_instinct_action(inst)}"
+        if line not in seen_lines:
+            evidence.append(line)
+            seen_lines.add(line)
+
+    evidence = _cap_evidence_lines(evidence)
+    name = parsed['meta'].get('name') or path.parent.name
+    body = _set_evidence_lines(parsed['body'], evidence)
+    return _write_evolved_skill(path, _render_evolved_frontmatter(name, merged_ids) + body)
+
+
 def _generate_evolved(skill_candidates: list, workflow_instincts: list, agent_candidates: list, evolved_dir: Path) -> list[str]:
     """Generate skill/command/agent files from analyzed instinct clusters."""
     generated = []
@@ -1170,23 +1419,31 @@ def _generate_evolved(skill_candidates: list, workflow_instincts: list, agent_ca
         if not name:
             continue
 
-        skill_dir = evolved_dir / "skills" / name
-        skill_dir.mkdir(parents=True, exist_ok=True)
+        # Dedupe: if an existing generated skill already covers (>= 0.8
+        # Jaccard on instinct ids) this cluster, append into it instead of
+        # creating a near-duplicate sibling.
+        new_ids = {i.get('id') for i in cand['instincts'] if i.get('id')}
+        target = _find_append_target(evolved_dir / "skills", new_ids)
+        if target is not None:
+            if _append_to_evolved_skill(target, cand):
+                generated.append(str(target))
+            continue
 
-        content = f"# {name}\n\n"
+        ids = [i.get('id') for i in cand['instincts'] if i.get('id')]
+        evidence = _cap_evidence_lines([f"- {_instinct_action(i)}" for i in cand['instincts']])
+
+        content = _render_evolved_frontmatter(name, ids)
+        content += f"# {name}\n\n"
         content += f"Evolved from {len(cand['instincts'])} instincts "
         content += f"(avg confidence: {cand['avg_confidence']:.0%})\n\n"
         content += f"## When to Apply\n\n"
         content += f"Trigger: {trigger}\n\n"
         content += f"## Actions\n\n"
-        for inst in cand['instincts']:
-            inst_content = inst.get('content', '')
-            action_match = re.search(r'## Action\s*\n\s*(.+?)(?:\n\n|\n##|$)', inst_content, re.DOTALL)
-            action = action_match.group(1).strip() if action_match else inst.get('id', 'unnamed')
-            content += f"- {action}\n"
+        content += '\n'.join(evidence) + '\n'
 
-        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
-        generated.append(str(skill_dir / "SKILL.md"))
+        skill_file = evolved_dir / "skills" / name / "SKILL.md"
+        if _write_evolved_skill(skill_file, content):
+            generated.append(str(skill_file))
 
     # Generate commands from workflow instincts
     for inst in workflow_instincts[:5]:
