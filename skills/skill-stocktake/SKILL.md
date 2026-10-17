@@ -36,22 +36,22 @@ If the project has no `.claude/skills/` directory, only global skills and comman
 | Quick Scan | `results.json` exists (default) | 5–10 min |
 | Full Stocktake | `results.json` absent, or `/skill-stocktake full` | 20–30 min |
 
-**Results cache:** `~/.claude/skills/skill-stocktake/results.json`
+**Results cache:** `~/.local/state/skill-stocktake/results.json`
 
 ## Quick Scan Flow
 
 Re-evaluate only skills that have changed since the last run (5–10 min).
 
-1. Read `~/.claude/skills/skill-stocktake/results.json`
+1. Read `~/.local/state/skill-stocktake/results.json`
 2. Run: `bash ~/.claude/skills/skill-stocktake/scripts/quick-diff.sh \
-         ~/.claude/skills/skill-stocktake/results.json`
+         ~/.local/state/skill-stocktake/results.json`
    (Project dir is auto-detected from `$PWD/.claude/skills`; pass it explicitly only if needed)
 3. If output is `[]`: report "No changes since last run." and stop
 4. Re-evaluate only those changed files using the same Phase 2 criteria
 5. Carry forward unchanged skills from previous results
 6. Output only the diff
 7. Run: `bash ~/.claude/skills/skill-stocktake/scripts/save-results.sh \
-         ~/.claude/skills/skill-stocktake/results.json <<< "$EVAL_RESULTS"`
+         ~/.local/state/skill-stocktake/results.json <<< "$EVAL_RESULTS"`
 
 ## Full Stocktake Flow
 
@@ -161,7 +161,7 @@ Evaluation is **holistic AI judgment** — not a numeric rubric. Guiding dimensi
 
 ## Results File Schema
 
-`~/.claude/skills/skill-stocktake/results.json`:
+`~/.local/state/skill-stocktake/results.json`:
 
 **`evaluated_at`**: Must be set to the actual UTC time of evaluation completion.
 Obtain via Bash: `date -u +%Y-%m-%dT%H:%M:%SZ`. Never use a date-only approximation like `T00:00:00Z`.
