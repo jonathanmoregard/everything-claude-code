@@ -28,6 +28,8 @@ if ! echo "$input_json" | jq empty 2>/dev/null; then
   exit 1
 fi
 
+mkdir -p "$(dirname "$RESULTS_JSON")"
+
 if [[ ! -f "$RESULTS_JSON" ]]; then
   # Bootstrap: create new results.json from stdin JSON + current UTC timestamp
   echo "$input_json" | jq --arg ea "$EVALUATED_AT" \
